@@ -2,14 +2,16 @@ import streamlit as st
 import pandas as pd
 from database import conectar
 from datetime import datetime
-
-def registrar_venta():
+def registrar_venta(usuario=None):
 
     st.title("🛒 Registrar Venta")
 
+
+    # Conexión a la base de datos
     conn = conectar()
     c = conn.cursor()
 
+    # Cargar productos
     productos = pd.read_sql("SELECT * FROM productos", conn)
 
     if productos.empty:
@@ -24,53 +26,102 @@ def registrar_venta():
 
     productos = productos.dropna()
 
+    # Filtrar productos con stock
+    productos_disponibles = productos[productos["stock"] > 0]
+    if productos_disponibles.empty:
+        st.info("Todos los productos están agotados.")
+        conn.close()
+        return
+
     producto_nombre = st.selectbox(
         "Selecciona un producto",
-        productos["nombre"]
+        productos_disponibles["nombre"]
     )
 
-    producto = productos[productos["nombre"] == producto_nombre].iloc[0]
+    producto = productos_disponibles[productos_disponibles["nombre"] == producto_nombre].iloc[0]
 
     producto_id = int(producto["id"])
-    precio = float(producto["precio"])
+    precio_unitario = float(producto["precio"])
     stock_actual = int(producto["stock"])
 
-    st.write(f"Stock disponible: {stock_actual}")
-    st.write(f"Precio unitario: ₡{precio}")
+    st.info(f"Stock disponible: {stock_actual} unidades")
+    st.info(f"Precio unitario: ₡{precio_unitario:,.2f}")
 
+
+    # Selección de cantidad
     cantidad = st.number_input(
-        "Cantidad",
+        "Cantidad a vender",
         min_value=1,
-        max_value=stock_actual if stock_actual > 0 else 1,
+        max_value=stock_actual,
         step=1
     )
 
-    total = cantidad * precio
+    total = cantidad * precio_unitario
+    st.success(f"Total de la venta: ₡{total:,.2f}")
 
-    st.write(f"Total: ₡{total}")
-
+    # Botón de registrar venta
     if st.button("Registrar Venta"):
 
         if cantidad > stock_actual:
-            st.error("No hay suficiente stock.")
+            st.error("No hay suficiente stock disponible.")
         else:
 
             fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            c.execute("""
-                INSERT INTO ventas (producto_id, cantidad, total, fecha)
-                VALUES (?, ?, ?, ?)
-            """, (producto_id, cantidad, total, fecha))
+            try:
+                # Registrar venta
+                c.execute("""
+                    INSERT INTO ventas (producto_id, cantidad, total, fecha)
+                    VALUES (?, ?, ?, ?)
+                """, (producto_id, cantidad, total, fecha))
 
-            nuevo_stock = stock_actual - cantidad
+                # Actualizar stock
+                nuevo_stock = stock_actual - cantidad
+                c.execute("""
+                    UPDATE productos
+                    SET stock = ?
+                    WHERE id = ?
+                """, (nuevo_stock, producto_id))
 
-            c.execute("""
-                UPDATE productos
-                SET stock = ?
-                WHERE id = ?
-            """, (nuevo_stock, producto_id))
+                # Registrar en logs si se pasa usuario
+                if usuario:
+                    c.execute("""
+                        INSERT INTO logs (usuario, accion, fecha)
+                        VALUES (?, ?, ?)
+                    """, (usuario, f"Registró venta de {cantidad} '{producto_nombre}' por ₡{total:,.2f}", fecha))
 
-            conn.commit()
-            st.success("Venta registrada correctamente.")
+                conn.commit()
+
+                st.success(f"✅ Venta registrada correctamente")
+                st.info(f"Producto: {producto_nombre} | Cantidad: {cantidad} | Total: ₡{total:,.2f}")
+                st.info(f"Stock actualizado: {nuevo_stock} unidades")
+
+                # Mostrar tabla de ventas
+                ventas_df = pd.read_sql("""
+                    SELECT v.id, p.nombre AS producto, v.cantidad, v.total, v.fecha
+                    FROM ventas v
+                    JOIN productos p ON v.producto_id = p.id
+                    ORDER BY v.fecha DESC
+                """, conn)
+
+                if not ventas_df.empty:
+                    st.subheader("Historial de Ventas")
+                    st.dataframe(ventas_df)
+
+            except Exception as e:
+                conn.rollback()
+                st.error(f"Ocurrió un error al registrar la venta: {e}")
+
+    else:
+        ventas_df = pd.read_sql("""
+            SELECT v.id, p.nombre AS producto, v.cantidad, v.total, v.fecha
+            FROM ventas v
+            JOIN productos p ON v.producto_id = p.id
+            ORDER BY v.fecha DESC
+        """, conn)
+
+        if not ventas_df.empty:
+            st.subheader("Historial de Ventas")
+            st.dataframe(ventas_df)
 
     conn.close()
